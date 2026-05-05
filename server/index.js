@@ -8,6 +8,7 @@ import { JsonDatabase } from './database.js';
 import { createRoutes } from './routes.js';
 import { setupSocket } from './socket.js';
 import { dataFile, uploadDir } from './storage-paths.js';
+import { safety } from './safety.js';
 import { WhatsAppService } from './whatsapp.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,7 +37,14 @@ app.use(express.urlencoded({ extended: true }));
 app.get(['/health', '/api/health'], (_request, response) => {
   response.json({
     ok: true,
-    connected: whatsapp.getStatus().connected
+    connected: whatsapp.getStatus().connected,
+    safeMode: {
+      autoStartWhatsApp: safety.autoStartWhatsApp,
+      allowWriteActions: safety.allowWriteActions,
+      allowPresenceActions: safety.allowPresenceActions,
+      syncFullHistory: safety.syncFullHistory,
+      downloadIncomingMedia: safety.downloadIncomingMedia
+    }
   });
 });
 app.use('/uploads', express.static(uploadDir));
@@ -45,13 +53,18 @@ app.use('/api', createRoutes({ db, whatsapp }));
 
 app.use((error, _request, response, _next) => {
   console.error(error);
-  response.status(500).json({
+  response.status(error.statusCode || 500).json({
     error: error.message || 'Internal server error'
   });
 });
 
 server.listen(port, host, async () => {
   console.log(`WhatsApp Web System running on ${host}:${port}`);
+  if (!safety.autoStartWhatsApp) {
+    console.warn('WhatsApp connection is disabled. Set ENABLE_WHATSAPP_CONNECTION=true only if you accept the account risk.');
+    return;
+  }
+
   try {
     await whatsapp.start();
   } catch (error) {
