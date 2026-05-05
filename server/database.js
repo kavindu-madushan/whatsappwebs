@@ -19,7 +19,10 @@ export class JsonDatabase {
 
   async init() {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    await this.reload();
+  }
 
+  async reload() {
     try {
       const raw = await fs.readFile(this.filePath, 'utf8');
       this.data = { ...structuredClone(DEFAULT_DATA), ...JSON.parse(raw) };
