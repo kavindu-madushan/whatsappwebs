@@ -1,0 +1,16 @@
+{
+  "name": "WhatsApp Web System",
+  "short_name": "WA System",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#e8ebe7",
+  "theme_color": "#16a085",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

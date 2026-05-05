@@ -1,0 +1,8 @@
+node_modules/
+.npm-cache/
+.env
+server/auth_info_baileys/
+server/backups/
+server/data/whatsapp.json
+uploads/
+*.log

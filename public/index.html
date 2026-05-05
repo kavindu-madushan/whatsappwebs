@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#16a085">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="WhatsApp Web System">
+  <title>WhatsApp Web System</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section id="loginScreen" class="login-screen">
+      <div class="login-panel">
+        <div class="brand-mark">W</div>
+        <h1>WhatsApp Web System</h1>
+        <p id="loginText">Starting connection...</p>
+        <div class="qr-frame">
+          <img id="qrImage" alt="WhatsApp login QR code">
+          <div id="qrPlaceholder" class="qr-placeholder">Waiting for QR</div>
+        </div>
+        <button id="refreshStatusBtn" class="secondary-button" type="button">Refresh</button>
+      </div>
+    </section>
+
+    <section id="chatApp" class="chat-app hidden">
+      <aside id="sidebar" class="sidebar">
+        <header class="sidebar-header">
+          <div>
+            <div class="eyebrow">Connected</div>
+            <h2 id="accountName">WhatsApp</h2>
+            <p id="syncStatus" class="sync-status"></p>
+          </div>
+          <div class="header-actions">
+            <button id="mainMenuBtn" class="icon-button menu-button" type="button" title="Menu">Menu</button>
+            <div id="mainMenu" class="dropdown-menu hidden">
+              <button id="themeBtn" type="button">Toggle theme</button>
+              <button id="soundBtn" type="button">Notification sound</button>
+              <button id="notifyBtn" class="notify-button" type="button">Browser notifications</button>
+              <button id="backupBtn" type="button">Create backup</button>
+              <button id="lockBtn" type="button">Lock app</button>
+              <button id="logoutBtn" type="button">Log out</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="sidebar-tabs">
+          <button id="chatsTabBtn" class="tab-button active" type="button">Chats</button>
+          <button id="statusTabBtn" class="tab-button" type="button">Status</button>
+        </div>
+
+        <div class="search-wrap">
+          <input id="searchInput" type="search" placeholder="Search or start new chat" autocomplete="off">
+          <div class="filter-row">
+            <button id="allFilterBtn" class="mini-button active" type="button">All</button>
+            <button id="unreadFilterBtn" class="mini-button" type="button">Unread</button>
+            <button id="groupsFilterBtn" class="mini-button" type="button">Groups</button>
+            <button id="archiveFilterBtn" class="mini-button" type="button">Archive</button>
+          </div>
+        </div>
+
+        <div id="chatList" class="chat-list">
+          <div class="loading-line">Loading chats...</div>
+        </div>
+      </aside>
+
+      <section class="conversation">
+        <header id="chatHeader" class="conversation-header">
+          <button id="backBtn" class="back-button" type="button" title="Back">‹</button>
+          <div class="avatar" id="chatAvatar">?</div>
+          <div>
+            <h2 id="chatTitle">Select a chat</h2>
+            <p id="chatSubtitle">Messages appear here</p>
+          </div>
+          <div class="chat-tools">
+            <input id="chatSearchInput" class="chat-search" type="search" placeholder="Search chat">
+            <button id="chatMenuBtn" class="tool-button menu-button" type="button">Actions</button>
+            <div id="chatMenu" class="dropdown-menu chat-dropdown hidden">
+              <button id="pinChatBtn" type="button">Pin chat</button>
+              <button id="archiveChatBtn" type="button">Archive chat</button>
+              <button id="markUnreadBtn" type="button">Mark unread</button>
+              <button id="galleryBtn" type="button">Gallery</button>
+              <button id="infoBtn" type="button">Chat info</button>
+              <button id="labelBtn" type="button">Labels</button>
+              <button id="reminderBtn" type="button">Reminder</button>
+              <button id="exportTxtBtn" type="button">Export TXT</button>
+              <button id="exportJsonBtn" type="button">Export JSON</button>
+            </div>
+          </div>
+        </header>
+
+        <div id="messages" class="messages">
+          <div class="empty-state">
+            <h3>No chat selected</h3>
+            <p>Choose a conversation from the sidebar.</p>
+          </div>
+        </div>
+
+        <form id="composer" class="composer">
+          <label class="attach-button" title="Attach media">
+            <input id="mediaInput" type="file" multiple accept="image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,audio/*">
+            +
+          </label>
+          <input id="messageInput" type="text" placeholder="Type a message" autocomplete="off">
+          <button id="sendBtn" class="send-button" type="submit">Send</button>
+          <div id="uploadQueue" class="upload-queue hidden"></div>
+        </form>
+      </section>
+    </section>
+
+    <div id="mediaViewer" class="media-viewer hidden" role="dialog" aria-modal="true">
+      <button id="closeViewerBtn" class="viewer-close" type="button" title="Close">x</button>
+      <div id="viewerContent" class="viewer-content"></div>
+    </div>
+
+    <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+    <aside id="detailPanel" class="detail-panel hidden">
+      <header class="detail-header">
+        <h2 id="detailTitle">Details</h2>
+        <button id="closeDetailBtn" class="tool-button" type="button">Close</button>
+      </header>
+      <div id="detailContent" class="detail-content"></div>
+    </aside>
+
+    <section id="lockScreen" class="lock-screen hidden">
+      <div class="login-panel">
+        <div class="brand-mark">W</div>
+        <h1>Locked</h1>
+        <p>Enter your local app PIN.</p>
+        <input id="pinInput" class="pin-input" type="password" placeholder="PIN">
+        <button id="unlockBtn" class="send-button" type="button">Unlock</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
