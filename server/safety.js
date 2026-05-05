@@ -1,12 +1,8 @@
-<<<<<<< HEAD
 import fs from 'fs/promises';
 import path from 'path';
 import { settingsFile } from './storage-paths.js';
 
 const DEFAULT_SAFETY = {
-=======
-export const safety = {
->>>>>>> 9d5d0b5eaa1d58db4f2702b4f82c6ee5d9c3a3f7
   autoStartWhatsApp: readFlag('ENABLE_WHATSAPP_CONNECTION', false),
   allowWriteActions: readFlag('ENABLE_WHATSAPP_WRITE_ACTIONS', false),
   allowPresenceActions: readFlag('ENABLE_WHATSAPP_PRESENCE_ACTIONS', false),
@@ -14,7 +10,6 @@ export const safety = {
   downloadIncomingMedia: readFlag('ENABLE_INCOMING_MEDIA_DOWNLOADS', false)
 };
 
-<<<<<<< HEAD
 export const safety = { ...DEFAULT_SAFETY };
 
 export async function initSafetySettings() {
@@ -43,8 +38,6 @@ export async function updateSafetySettings(updates = {}) {
   return getSafetySettings();
 }
 
-=======
->>>>>>> 9d5d0b5eaa1d58db4f2702b4f82c6ee5d9c3a3f7
 export function assertAllowed(allowed, message) {
   if (!allowed) {
     const error = new Error(message);
@@ -58,7 +51,6 @@ function readFlag(name, fallback) {
   if (value == null || value === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
-<<<<<<< HEAD
 
 function applySafetySettings(updates = {}) {
   for (const key of Object.keys(DEFAULT_SAFETY)) {
@@ -71,5 +63,3 @@ function applySafetySettings(updates = {}) {
 async function persistSafetySettings() {
   await fs.writeFile(settingsFile, JSON.stringify(getSafetySettings(), null, 2));
 }
-=======
->>>>>>> 9d5d0b5eaa1d58db4f2702b4f82c6ee5d9c3a3f7
