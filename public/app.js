@@ -12,7 +12,8 @@ const state = {
   chatFilter: 'all',
   chatSearch: '',
   presence: {},
-  uploadQueue: []
+  uploadQueue: [],
+  adminSettings: {}
 };
 
 const loginScreen = document.getElementById('loginScreen');
@@ -21,6 +22,7 @@ const loginText = document.getElementById('loginText');
 const qrImage = document.getElementById('qrImage');
 const qrPlaceholder = document.getElementById('qrPlaceholder');
 const refreshStatusBtn = document.getElementById('refreshStatusBtn');
+const loginAdminBtn = document.getElementById('loginAdminBtn');
 const accountName = document.getElementById('accountName');
 const syncStatus = document.getElementById('syncStatus');
 const chatList = document.getElementById('chatList');
@@ -57,6 +59,7 @@ const infoBtn = document.getElementById('infoBtn');
 const labelBtn = document.getElementById('labelBtn');
 const reminderBtn = document.getElementById('reminderBtn');
 const backupBtn = document.getElementById('backupBtn');
+const adminPanelBtn = document.getElementById('adminPanelBtn');
 const lockBtn = document.getElementById('lockBtn');
 const exportTxtBtn = document.getElementById('exportTxtBtn');
 const exportJsonBtn = document.getElementById('exportJsonBtn');
@@ -74,6 +77,7 @@ const pinInput = document.getElementById('pinInput');
 const unlockBtn = document.getElementById('unlockBtn');
 
 refreshStatusBtn.addEventListener('click', loadStatus);
+loginAdminBtn.addEventListener('click', showAdminPanel);
 mainMenuBtn.addEventListener('click', (event) => toggleDropdown(event, mainMenu));
 chatMenuBtn.addEventListener('click', (event) => toggleDropdown(event, chatMenu));
 chatsTabBtn.addEventListener('click', () => setSidebarView('chats'));
@@ -105,6 +109,7 @@ infoBtn.addEventListener('click', showInfoPanel);
 labelBtn.addEventListener('click', showLabelPanel);
 reminderBtn.addEventListener('click', addReminderForChat);
 backupBtn.addEventListener('click', createBackup);
+adminPanelBtn.addEventListener('click', showAdminPanel);
 lockBtn.addEventListener('click', lockApp);
 exportTxtBtn.addEventListener('click', () => exportChat('txt'));
 exportJsonBtn.addEventListener('click', () => exportChat('json'));
@@ -211,6 +216,7 @@ async function loadStatus() {
 
 function applyStatus(status) {
   state.connected = Boolean(status.connected);
+  state.adminSettings = status.safeMode || state.adminSettings || {};
 
   if (state.connected) {
     accountName.textContent = status.me?.name || status.me?.id || 'WhatsApp';
@@ -805,6 +811,133 @@ async function createBackup() {
   alert(`Backup created: ${result.file}`);
 }
 
+async function showAdminPanel() {
+  mainMenu.classList.add('hidden');
+  detailTitle.textContent = 'Admin Panel';
+  detailPanel.classList.remove('hidden');
+  detailContent.innerHTML = '<div class="loading-line">Loading admin settings...</div>';
+
+  try {
+    const [{ settings, connected }, backupsResult] = await Promise.all([
+      api('/api/admin/settings'),
+      api('/api/admin/database/backups')
+    ]);
+    state.adminSettings = settings || {};
+    renderAdminPanel(settings || {}, backupsResult.backups || [], connected);
+  } catch (error) {
+    detailContent.innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function renderAdminPanel(settings, backups, connected) {
+  detailContent.innerHTML = `
+    <section class="detail-section admin-status">
+      <h3>Connection</h3>
+      <p>${connected ? 'WhatsApp is connected' : 'WhatsApp is disconnected'}</p>
+    </section>
+
+    <section class="detail-section admin-grid">
+      ${renderAdminToggle('autoStartWhatsApp', 'WhatsApp connection', 'Show QR and connect to WhatsApp. Risky on cloud hosting.', settings.autoStartWhatsApp)}
+      ${renderAdminToggle('allowWriteActions', 'Send messages/media', 'Allow sending messages, media, and reactions.', settings.allowWriteActions)}
+      ${renderAdminToggle('allowPresenceActions', 'Typing/online presence', 'Allow typing and presence updates.', settings.allowPresenceActions)}
+      ${renderAdminToggle('syncFullHistory', 'Auto sync history', 'Enable full WhatsApp history sync on next connection.', settings.syncFullHistory)}
+      ${renderAdminToggle('downloadIncomingMedia', 'Download incoming media', 'Save incoming chat and status media.', settings.downloadIncomingMedia)}
+    </section>
+
+    <section class="detail-section admin-actions">
+      <h3>Database Management</h3>
+      <button id="adminBackupBtn" class="tool-button" type="button">Create backup</button>
+      <button id="adminDeleteDbBtn" class="tool-button danger-button" type="button">Delete database</button>
+    </section>
+
+    <section class="detail-section">
+      <h3>Restore Backup</h3>
+      <div class="asset-list">
+        ${backups.length ? backups.map((file) => `
+          <button class="backup-item" type="button" data-restore-backup="${escapeAttr(file)}">
+            <span>${escapeHtml(file)}</span>
+            <strong>Restore</strong>
+          </button>
+        `).join('') : '<p>No backups yet</p>'}
+      </div>
+    </section>
+  `;
+
+  detailContent.querySelectorAll('[data-admin-toggle]').forEach((input) => {
+    input.addEventListener('change', saveAdminSettings);
+  });
+  document.getElementById('adminBackupBtn').addEventListener('click', adminCreateBackup);
+  document.getElementById('adminDeleteDbBtn').addEventListener('click', adminDeleteDatabase);
+  detailContent.querySelectorAll('[data-restore-backup]').forEach((button) => {
+    button.addEventListener('click', () => adminRestoreBackup(button.dataset.restoreBackup));
+  });
+}
+
+function renderAdminToggle(key, title, description, checked) {
+  return `
+    <label class="admin-toggle">
+      <input type="checkbox" data-admin-toggle="${escapeAttr(key)}" ${checked ? 'checked' : ''}>
+      <span>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(description)}</small>
+      </span>
+    </label>
+  `;
+}
+
+async function saveAdminSettings() {
+  const settings = {};
+  detailContent.querySelectorAll('[data-admin-toggle]').forEach((input) => {
+    settings[input.dataset.adminToggle] = input.checked;
+  });
+
+  const result = await api('/api/admin/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings)
+  });
+  state.adminSettings = result.settings || {};
+  showToast('Admin settings saved.');
+  loadStatus();
+}
+
+async function adminCreateBackup() {
+  const result = await api('/api/admin/database/backup', { method: 'POST' });
+  showToast(`Backup created: ${result.file}`);
+  showAdminPanel();
+}
+
+async function adminRestoreBackup(file) {
+  if (!confirm(`Restore database from ${file}? A pre-restore backup will be created first.`)) return;
+  await api('/api/admin/database/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file })
+  });
+  state.chats = [];
+  state.statuses = [];
+  state.messages.clear();
+  await loadChats();
+  await loadStatuses();
+  showToast('Database restored.');
+  showAdminPanel();
+}
+
+async function adminDeleteDatabase() {
+  const typed = prompt('Type DELETE to clear the local database. A backup will be created first.');
+  if (typed !== 'DELETE') return;
+  await api('/api/admin/database', { method: 'DELETE' });
+  state.chats = [];
+  state.statuses = [];
+  state.messages.clear();
+  state.activeJid = '';
+  state.activeStatusJid = '';
+  renderSidebarList();
+  renderMessages();
+  showToast('Database cleared.');
+  showAdminPanel();
+}
+
 function renderQuotedPreview(quoted) {
   if (!quoted?.id) return '';
 
@@ -973,6 +1106,15 @@ function showInAppToast(message) {
   window.setTimeout(() => toast.remove(), 6000);
 }
 
+function showToast(text) {
+  if (!toastStack) return;
+  const toast = document.createElement('div');
+  toast.className = 'message-toast simple-toast';
+  toast.textContent = text;
+  toastStack.appendChild(toast);
+  window.setTimeout(() => toast.remove(), 3600);
+}
+
 function updateMessageInState(message) {
   if (!message?.jid || !message?.id) return;
   const list = state.messages.get(message.jid) || [];
@@ -1027,9 +1169,10 @@ function showApp() {
 }
 
 function setComposerEnabled(enabled) {
-  messageInput.disabled = !enabled;
-  mediaInput.disabled = !enabled;
-  sendBtn.disabled = !enabled;
+  const canSend = enabled && Boolean(state.adminSettings?.allowWriteActions);
+  messageInput.disabled = !canSend;
+  mediaInput.disabled = !canSend;
+  sendBtn.disabled = !canSend;
 }
 
 function openViewer(url, type) {
