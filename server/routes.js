@@ -3,7 +3,11 @@ import fs from 'fs/promises';
 import multer from 'multer';
 import path from 'path';
 import { createPublicId, uploadLocalFile } from './cloudinary-storage.js';
+<<<<<<< HEAD
+import { getSafetySettings, safety, updateSafetySettings } from './safety.js';
+=======
 import { safety } from './safety.js';
+>>>>>>> 9d5d0b5eaa1d58db4f2702b4f82c6ee5d9c3a3f7
 import { backupDir, dataFile, uploadDir } from './storage-paths.js';
 
 const storage = multer.diskStorage({
@@ -35,6 +39,40 @@ export function createRoutes({ db, whatsapp }) {
         downloadIncomingMedia: safety.downloadIncomingMedia
       }
     });
+<<<<<<< HEAD
+  });
+
+  router.get('/admin/settings', (_request, response) => {
+    response.json({
+      ok: true,
+      settings: getSafetySettings(),
+      connected: whatsapp.getStatus().connected
+    });
+  });
+
+  router.post('/admin/settings', async (request, response, next) => {
+    try {
+      const previousAutoStart = safety.autoStartWhatsApp;
+      const settings = await updateSafetySettings(request.body || {});
+
+      if (!previousAutoStart && settings.autoStartWhatsApp) {
+        await whatsapp.start();
+      }
+
+      if (previousAutoStart && !settings.autoStartWhatsApp) {
+        await whatsapp.stop();
+      }
+
+      response.json({
+        ok: true,
+        settings,
+        connected: whatsapp.getStatus().connected
+      });
+    } catch (error) {
+      next(error);
+    }
+=======
+>>>>>>> 9d5d0b5eaa1d58db4f2702b4f82c6ee5d9c3a3f7
   });
 
   router.get('/chats', async (_request, response, next) => {
@@ -198,24 +236,7 @@ export function createRoutes({ db, whatsapp }) {
 
   router.post('/backup', async (_request, response, next) => {
     try {
-      await fs.mkdir(backupDir, { recursive: true });
-      const name = `backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-      const backupPath = path.join(backupDir, name);
-      await fs.copyFile(dataFile, backupPath);
-
-      let cloudinary = null;
-      try {
-        cloudinary = await uploadLocalFile(backupPath, {
-          folder: 'chat-backups',
-          publicId: createPublicId('backup', name),
-          resourceType: 'raw',
-          context: 'type=chat_backup'
-        });
-      } catch (error) {
-        console.warn('Cloudinary backup upload failed:', error.message);
-      }
-
-      response.json({ ok: true, file: name, cloudinary });
+      response.json({ ok: true, ...(await createDatabaseBackup()) });
     } catch (error) {
       next(error);
     }
@@ -223,9 +244,47 @@ export function createRoutes({ db, whatsapp }) {
 
   router.get('/backups', async (_request, response, next) => {
     try {
-      await fs.mkdir(backupDir, { recursive: true });
-      const files = await fs.readdir(backupDir);
-      response.json(files.sort().reverse());
+      response.json(await listBackups());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/admin/database/backups', async (_request, response, next) => {
+    try {
+      response.json({ ok: true, backups: await listBackups() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/admin/database/backup', async (_request, response, next) => {
+    try {
+      response.json({ ok: true, ...(await createDatabaseBackup()) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/admin/database/restore', async (request, response, next) => {
+    try {
+      const file = sanitizeBackupName(request.body?.file);
+      if (!file) return response.status(400).json({ error: 'Valid backup file is required.' });
+
+      await createDatabaseBackup('pre-restore');
+      await fs.copyFile(path.join(backupDir, file), dataFile);
+      await db.reload();
+      response.json({ ok: true, file });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/admin/database', async (_request, response, next) => {
+    try {
+      const backup = await createDatabaseBackup('pre-delete');
+      await db.clear();
+      response.json({ ok: true, backup });
     } catch (error) {
       next(error);
     }
@@ -255,6 +314,41 @@ export function createRoutes({ db, whatsapp }) {
   });
 
   return router;
+
+  async function createDatabaseBackup(prefix = 'backup') {
+    await fs.mkdir(backupDir, { recursive: true });
+    const name = `${prefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    const backupPath = path.join(backupDir, name);
+    await fs.copyFile(dataFile, backupPath);
+
+    let cloudinary = null;
+    try {
+      cloudinary = await uploadLocalFile(backupPath, {
+        folder: 'chat-backups',
+        publicId: createPublicId(prefix, name),
+        resourceType: 'raw',
+        context: 'type=chat_backup'
+      });
+    } catch (error) {
+      console.warn('Cloudinary backup upload failed:', error.message);
+    }
+
+    return { file: name, cloudinary };
+  }
+
+  async function listBackups() {
+    await fs.mkdir(backupDir, { recursive: true });
+    const files = await fs.readdir(backupDir);
+    return files
+      .filter((file) => file.endsWith('.json'))
+      .sort()
+      .reverse();
+  }
+}
+
+function sanitizeBackupName(file = '') {
+  const safe = path.basename(String(file));
+  return safe.endsWith('.json') ? safe : '';
 }
 
 function formatMessageLine(message) {
