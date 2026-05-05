@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import multer from 'multer';
 import path from 'path';
 import { createPublicId, uploadLocalFile } from './cloudinary-storage.js';
+import { safety } from './safety.js';
 import { backupDir, dataFile, uploadDir } from './storage-paths.js';
 
 const storage = multer.diskStorage({
@@ -24,7 +25,16 @@ export function createRoutes({ db, whatsapp }) {
   const router = express.Router();
 
   router.get('/status', (_request, response) => {
-    response.json(whatsapp.getStatus());
+    response.json({
+      ...whatsapp.getStatus(),
+      safeMode: {
+        autoStartWhatsApp: safety.autoStartWhatsApp,
+        allowWriteActions: safety.allowWriteActions,
+        allowPresenceActions: safety.allowPresenceActions,
+        syncFullHistory: safety.syncFullHistory,
+        downloadIncomingMedia: safety.downloadIncomingMedia
+      }
+    });
   });
 
   router.get('/chats', async (_request, response, next) => {
