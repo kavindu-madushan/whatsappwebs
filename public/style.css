@@ -118,6 +118,13 @@ input {
   color: var(--text);
 }
 
+.login-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .chat-app {
   width: min(1500px, 100%);
   height: min(920px, calc(100dvh - 16px));
@@ -903,6 +910,87 @@ input {
   display: grid;
   gap: 8px;
   overflow-wrap: anywhere;
+}
+
+.admin-status p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.admin-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-toggle {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  cursor: pointer;
+}
+
+.admin-toggle input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  accent-color: var(--green);
+}
+
+.admin-toggle span {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-toggle small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.admin-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.danger-button {
+  color: white;
+  background: var(--danger);
+}
+
+.backup-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-soft);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.backup-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-item strong {
+  color: var(--green-dark);
+  font-size: 12px;
+}
+
+.simple-toast {
+  min-height: 42px;
+  display: flex;
 }
 
 .lock-screen {
