@@ -8,11 +8,7 @@ import { JsonDatabase } from './database.js';
 import { createRoutes } from './routes.js';
 import { setupSocket } from './socket.js';
 import { dataFile, uploadDir } from './storage-paths.js';
-<<<<<<< HEAD
 import { initSafetySettings, safety } from './safety.js';
-=======
-import { safety } from './safety.js';
->>>>>>> 9d5d0b5eaa1d58db4f2702b4f82c6ee5d9c3a3f7
 import { WhatsAppService } from './whatsapp.js';
 
 const __filename = fileURLToPath(import.meta.url);
