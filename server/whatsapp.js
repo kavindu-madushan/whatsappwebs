@@ -12,6 +12,7 @@ import mime from 'mime-types';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { createPublicId, uploadBuffer, uploadLocalFile } from './cloudinary-storage.js';
+import { assertAllowed, safety } from './safety.js';
 import { emitSocket } from './socket.js';
 import { authDir, avatarDir, uploadDir } from './storage-paths.js';
 
@@ -71,8 +72,8 @@ export class WhatsAppService {
       browser: ['Personal WhatsApp Web System', 'Chrome', '1.0.0'],
       logger: pino({ level: 'silent' }),
       markOnlineOnConnect: false,
-      syncFullHistory: true,
-      shouldSyncHistoryMessage: () => true
+      syncFullHistory: safety.syncFullHistory,
+      shouldSyncHistoryMessage: () => safety.syncFullHistory
     });
 
     this.sock.ev.on('creds.update', saveCreds);
@@ -389,7 +390,7 @@ export class WhatsAppService {
       timestamp
     };
 
-    if (['imageMessage', 'videoMessage', 'audioMessage'].includes(type)) {
+    if (safety.downloadIncomingMedia && ['imageMessage', 'videoMessage', 'audioMessage'].includes(type)) {
       const media = await this.saveIncomingMedia(rawMessage, content[type], normalizedType, {
         folder: 'status-media'
       });
@@ -553,7 +554,7 @@ export class WhatsAppService {
       }
     }
 
-    if (options.downloadMedia !== false && ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(type)) {
+    if (options.downloadMedia !== false && safety.downloadIncomingMedia && ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(type)) {
       const media = await this.saveIncomingMedia(rawMessage, content[type], parsed.type);
       parsed.mediaUrl = media.mediaUrl;
       parsed.fileName = media.fileName;
@@ -606,6 +607,7 @@ export class WhatsAppService {
   }
 
   async sendText(jid, text) {
+    assertAllowed(safety.allowWriteActions, 'WhatsApp write actions are disabled in safe mode.');
     this.assertConnected();
     const trimmed = String(text || '').trim();
     if (!trimmed) throw new Error('Message text is required.');
@@ -642,6 +644,7 @@ export class WhatsAppService {
   }
 
   async sendMedia(jid, file, caption = '') {
+    assertAllowed(safety.allowWriteActions, 'WhatsApp media sending is disabled in safe mode.');
     this.assertConnected();
     if (!file) throw new Error('Media file is required.');
 
@@ -694,6 +697,7 @@ export class WhatsAppService {
   }
 
   async sendReaction(jid, messageId, text) {
+    assertAllowed(safety.allowWriteActions, 'WhatsApp reactions are disabled in safe mode.');
     this.assertConnected();
     const messages = await this.db.getMessages(jid);
     const target = messages.find((message) => message.id === messageId);
@@ -721,6 +725,7 @@ export class WhatsAppService {
   }
 
   async sendPresence(jid, type) {
+    assertAllowed(safety.allowPresenceActions, 'WhatsApp presence updates are disabled in safe mode.');
     this.assertConnected();
     await this.sock.sendPresenceUpdate(type, jid);
   }
