@@ -139,6 +139,7 @@ export class WhatsAppService {
   }
 
   scheduleReconnect() {
+    if (!safety.autoStartWhatsApp) return;
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.start().catch((error) => {
@@ -787,6 +788,27 @@ export class WhatsAppService {
         lastSyncType: null
       }
     };
+    emitSocket('disconnected', this.getStatus());
+  }
+
+  async stop() {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+
+    if (this.sock?.end) {
+      try {
+        this.sock.end(new Error('WhatsApp connection disabled from admin panel.'));
+      } catch (error) {
+        console.warn('Socket stop failed:', error.message);
+      }
+    }
+
+    this.sock = null;
+    this.status.connected = false;
+    this.status.connecting = false;
+    this.status.qr = '';
+    this.status.qrDataUrl = '';
+    this.status.lastDisconnect = 'WhatsApp connection disabled';
     emitSocket('disconnected', this.getStatus());
   }
 
