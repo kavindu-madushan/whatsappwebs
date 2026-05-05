@@ -18,6 +18,10 @@ export const dataFile = runtimeDataDir
   ? path.join(runtimeDataDir, 'data', 'whatsapp.json')
   : path.join(__dirname, 'data', 'whatsapp.json');
 
+export const settingsFile = runtimeDataDir
+  ? path.join(runtimeDataDir, 'admin-settings.json')
+  : path.join(__dirname, 'data', 'admin-settings.json');
+
 export const authDir = runtimeDataDir
   ? path.join(runtimeDataDir, 'auth_info_baileys')
   : path.join(__dirname, 'auth_info_baileys');
