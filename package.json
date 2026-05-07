@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-web-system",
   "version": "1.0.0",
-  "description": "Personal WhatsApp Web style dashboard using Node.js, Express, Socket.IO, Baileys, and JSON storage.",
+  "description": "Personal WhatsApp Web style dashboard using Node.js, Express, Socket.IO, whatsapp-web.js, and JSON storage.",
   "main": "server/index.js",
   "type": "module",
   "scripts": {
@@ -9,15 +9,13 @@
   },
   "keywords": [
     "whatsapp",
-    "baileys",
+    "whatsapp-web.js",
     "socket.io",
     "express"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "6.7.19",
     "cloudinary": "^2.10.0",
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
@@ -25,7 +23,8 @@
     "multer": "^2.0.2",
     "pino": "^9.4.0",
     "qrcode": "^1.5.4",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "whatsapp-web.js": "^1.34.7"
   },
   "engines": {
     "node": ">=18"
