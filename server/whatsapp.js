@@ -1,25 +1,28 @@
 import fs from 'fs/promises';
 import path from 'path';
-import makeWASocket, {
-  DisconnectReason,
-  downloadMediaMessage,
-  fetchLatestBaileysVersion,
-  getContentType,
-  useMultiFileAuthState
-} from '@whiskeysockets/baileys';
-import { Boom } from '@hapi/boom';
 import mime from 'mime-types';
-import pino from 'pino';
 import QRCode from 'qrcode';
+import whatsappWeb from 'whatsapp-web.js';
 import { createPublicId, uploadBuffer, uploadLocalFile } from './cloudinary-storage.js';
 import { assertAllowed, safety } from './safety.js';
 import { emitSocket } from './socket.js';
 import { authDir, avatarDir, uploadDir } from './storage-paths.js';
 
+const { Client, LocalAuth, MessageMedia } = whatsappWeb;
+
+const EMPTY_HISTORY_SYNC = {
+  active: false,
+  progress: null,
+  chats: 0,
+  contacts: 0,
+  messages: 0,
+  lastSyncType: null
+};
+
 export class WhatsAppService {
   constructor(database) {
     this.db = database;
-    this.sock = null;
+    this.client = null;
     this.status = {
       connected: false,
       connecting: false,
@@ -27,19 +30,12 @@ export class WhatsAppService {
       qrDataUrl: '',
       me: null,
       lastDisconnect: '',
-      historySync: {
-        active: false,
-        progress: null,
-        chats: 0,
-        contacts: 0,
-        messages: 0,
-        lastSyncType: null
-      }
+      historySync: { ...EMPTY_HISTORY_SYNC }
     };
     this.reconnectTimer = null;
-    this.groupNameCache = new Map();
     this.avatarCache = new Map();
     this.presence = {};
+    this.stopping = false;
   }
 
   getStatus() {
@@ -55,46 +51,48 @@ export class WhatsAppService {
   }
 
   async start() {
-    if (this.status.connecting) return;
+    if (this.status.connecting || this.status.connected) return;
 
+    this.stopping = false;
     this.status.connecting = true;
+    this.status.lastDisconnect = '';
+
     await fs.mkdir(authDir, { recursive: true });
     await fs.mkdir(uploadDir, { recursive: true });
     await fs.mkdir(avatarDir, { recursive: true });
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    const { version } = await fetchLatestBaileysVersion();
-
-    this.sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false,
-      browser: ['Personal WhatsApp Web System', 'Chrome', '1.0.0'],
-      logger: pino({ level: 'silent' }),
-      markOnlineOnConnect: false,
-      syncFullHistory: safety.syncFullHistory,
-      shouldSyncHistoryMessage: () => safety.syncFullHistory
+    this.client = new Client({
+      authStrategy: new LocalAuth({
+        dataPath: authDir
+      }),
+      puppeteer: {
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote'
+        ]
+      }
     });
 
-    this.sock.ev.on('creds.update', saveCreds);
-    this.sock.ev.on('messaging-history.set', (payload) => this.handleHistorySet(payload));
-    this.sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(update));
-    this.sock.ev.on('messages.upsert', (payload) => this.handleMessagesUpsert(payload));
-    this.sock.ev.on('messages.update', (updates) => this.handleMessagesUpdate(updates));
-    this.sock.ev.on('messages.reaction', (updates) => this.handleReactionsUpdate(updates));
-    this.sock.ev.on('message-receipt.update', (updates) => this.handleReceiptUpdate(updates));
-    this.sock.ev.on('presence.update', (update) => this.handlePresenceUpdate(update));
-    this.sock.ev.on('chats.upsert', (chats) => this.handleChatsUpsert(chats));
-    this.sock.ev.on('contacts.upsert', (contacts) => this.handleContactsUpsert(contacts));
-    this.sock.ev.on('groups.update', (updates) => this.handleGroupsUpdate(updates));
+    this.bindClientEvents(this.client);
+    this.client.initialize().catch((error) => {
+      console.error('Failed to initialize whatsapp-web.js:', error);
+      this.status.connecting = false;
+      this.status.lastDisconnect = error.message || 'Connection failed';
+      emitSocket('disconnected', this.getStatus());
+      this.scheduleReconnect();
+    });
   }
 
-  async handleConnectionUpdate(update) {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
+  bindClientEvents(client) {
+    client.on('qr', async (qr) => {
       this.status.qr = qr;
-      const qrDataUrl = await QRCode.toDataURL(qr, {
+      this.status.qrDataUrl = await QRCode.toDataURL(qr, {
         margin: 1,
         width: 280,
         color: {
@@ -102,40 +100,64 @@ export class WhatsAppService {
           light: '#ffffff'
         }
       });
-      emitSocket('qr', { qr, qrDataUrl });
-      this.status.qrDataUrl = qrDataUrl;
-    }
+      this.status.connecting = true;
+      emitSocket('qr', { qr, qrDataUrl: this.status.qrDataUrl });
+    });
 
-    if (connection === 'open') {
+    client.on('authenticated', () => {
+      this.status.lastDisconnect = '';
+    });
+
+    client.on('auth_failure', (message) => {
+      this.status.connected = false;
+      this.status.connecting = false;
+      this.status.lastDisconnect = `Authentication failed: ${message || ''}`.trim();
+      emitSocket('disconnected', this.getStatus());
+    });
+
+    client.on('ready', async () => {
       this.status.connected = true;
       this.status.connecting = false;
       this.status.qr = '';
       this.status.qrDataUrl = '';
-      this.status.me = this.sock?.user || null;
+      this.status.me = this.normalizeMe(client.info);
       this.status.lastDisconnect = '';
       emitSocket('connected', this.getStatus());
-      emitSocket('chats', await this.db.getChats());
+      await this.refreshChats();
       emitSocket('statuses', await this.db.getStatuses());
-    }
+    });
 
-    if (connection === 'close') {
-      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
-
+    client.on('disconnected', (reason) => {
       this.status.connected = false;
       this.status.connecting = false;
       this.status.qr = '';
       this.status.qrDataUrl = '';
-      this.status.lastDisconnect = loggedOut ? 'Logged out' : 'Connection closed';
+      this.status.lastDisconnect = reason || 'Disconnected';
+      this.client = null;
       emitSocket('disconnected', this.getStatus());
+      if (!this.stopping) this.scheduleReconnect();
+    });
 
-      if (loggedOut) {
-        await this.clearAuthSession();
-        return;
-      }
+    client.on('message', (message) => this.handleMessage(message));
+    client.on('message_create', (message) => {
+      if (message.fromMe) this.handleMessage(message);
+    });
+    client.on('message_revoke_everyone', (message, revokedMessage) => {
+      this.handleDeletedMessage({
+        jid: message?.from || revokedMessage?.from,
+        messageId: revokedMessage?.id?._serialized || message?.id?._serialized,
+        deletedAt: Date.now()
+      }).catch((error) => console.error('Failed to process message revoke:', error));
+    });
+    client.on('message_reaction', (reaction) => this.handleReaction(reaction));
+    client.on('message_ack', (message, ack) => this.handleAck(message, ack));
+  }
 
-      this.scheduleReconnect();
-    }
+  normalizeMe(info = {}) {
+    return {
+      id: info.wid?._serialized || info.wid?.user || '',
+      name: info.pushname || info.me?.pushname || info.platform || 'WhatsApp'
+    };
   }
 
   scheduleReconnect() {
@@ -146,161 +168,187 @@ export class WhatsAppService {
         console.error('Reconnect failed:', error);
         this.scheduleReconnect();
       });
-    }, 3000);
+    }, 5000);
   }
 
-  async clearAuthSession() {
+  async refreshChats() {
+    if (!this.client) return;
     try {
-      await fs.rm(authDir, { recursive: true, force: true });
-      await fs.mkdir(authDir, { recursive: true });
-    } catch (error) {
-      console.error('Failed to clear auth session:', error);
-    }
-  }
-
-  async handleChatsUpsert(chats = []) {
-    for (const chat of chats) {
-      const isGroup = chat.id?.endsWith('@g.us');
-      await this.db.upsertChat({
-        jid: chat.id,
-        name: isGroup ? await this.getGroupName(chat.id, chat.subject || chat.name) : chat.name || chat.subject,
-        isGroup,
-        avatarUrl: await this.getAvatarUrl(chat.id),
-        lastTimestamp: Number(chat.conversationTimestamp || Date.now())
-      });
-    }
-    emitSocket('chats', await this.db.getChats());
-  }
-
-  async handleContactsUpsert(contacts = []) {
-    for (const contact of contacts) {
-      const isGroup = contact.id?.endsWith('@g.us');
-      await this.db.upsertChat({
-        jid: contact.id,
-        name: isGroup
-          ? await this.getGroupName(contact.id, contact.notify || contact.name || contact.verifiedName)
-          : contact.notify || contact.name || contact.verifiedName,
-        isGroup,
-        avatarUrl: await this.getAvatarUrl(contact.id)
-      });
-    }
-    emitSocket('chats', await this.db.getChats());
-  }
-
-  async handleHistorySet({ chats = [], contacts = [], messages = [], isLatest, progress, syncType }) {
-    this.status.historySync = {
-      active: !isLatest,
-      progress: progress ?? this.status.historySync.progress,
-      chats: this.status.historySync.chats + chats.length,
-      contacts: this.status.historySync.contacts + contacts.length,
-      messages: this.status.historySync.messages + messages.length,
-      lastSyncType: syncType ?? this.status.historySync.lastSyncType
-    };
-    emitSocket('history-sync', this.status.historySync);
-
-    for (const contact of contacts) {
-      const isGroup = contact.id?.endsWith('@g.us');
-      await this.db.upsertChat({
-        jid: contact.id,
-        name: isGroup
-          ? await this.getGroupName(contact.id, contact.notify || contact.name || contact.verifiedName)
-          : contact.notify || contact.name || contact.verifiedName,
-        isGroup,
-        avatarUrl: await this.getAvatarUrl(contact.id)
-      });
-    }
-
-    for (const chat of chats) {
-      const jid = chat.id;
-      if (!jid || jid === 'status@broadcast') continue;
-
-      const isGroup = jid.endsWith('@g.us');
-      await this.db.upsertChat({
-        jid,
-        name: isGroup ? await this.getGroupName(jid, chat.subject || chat.name) : chat.name || chat.subject,
-        isGroup,
-        avatarUrl: await this.getAvatarUrl(jid),
-        lastMessage: chat.messages?.[0]?.message ? '' : undefined,
-        lastTimestamp: Number(chat.conversationTimestamp || chat.t || Date.now())
-      });
-    }
-
-    let inserted = 0;
-    for (const rawMessage of [...messages].reverse()) {
-      if (!rawMessage?.message) continue;
-
-      try {
-        if (rawMessage.key?.remoteJid === 'status@broadcast') {
-          await this.handleStatusMessage(rawMessage);
-          continue;
-        }
-
-        const parsed = await this.parseMessage(rawMessage, { downloadMedia: false });
-        if (parsed.event === 'ignore') continue;
-        if (parsed.event === 'message-deleted') {
-          await this.handleDeletedMessage(parsed);
-          continue;
-        }
-
-        const result = await this.db.saveMessage(parsed);
-        if (result.inserted) inserted += 1;
-      } catch (error) {
-        console.error('Failed to import history message:', error);
+      const chats = await this.client.getChats();
+      for (const chat of chats) {
+        if (!chat?.id?._serialized || chat.id._serialized === 'status@broadcast') continue;
+        await this.db.upsertChat({
+          jid: chat.id._serialized,
+          name: chat.name || chat.formattedTitle || chat.id.user || chat.id._serialized,
+          isGroup: Boolean(chat.isGroup),
+          avatarUrl: await this.getAvatarUrl(chat.id._serialized),
+          lastMessage: chat.lastMessage ? extractWwebText(chat.lastMessage) || mediaLabel(normalizeWwebType(chat.lastMessage.type)) : undefined,
+          lastTimestamp: Number(chat.timestamp || Date.now() / 1000) * 1000,
+          unreadCount: Number(chat.unreadCount || 0)
+        });
       }
+      emitSocket('chats', await this.db.getChats());
+    } catch (error) {
+      console.warn('Could not refresh chats:', error.message);
+    }
+  }
+
+  async handleMessage(message) {
+    if (!message) return;
+
+    try {
+      if (message.from === 'status@broadcast') {
+        await this.handleStatusMessage(message);
+        return;
+      }
+
+      const parsed = await this.parseMessage(message);
+      const result = await this.db.saveMessage(parsed);
+      if (result.inserted) {
+        emitSocket(message.fromMe ? 'message-sent' : 'new-message', result.message);
+        if (message.fromMe) emitSocket('new-message', result.message);
+        emitSocket('chats', await this.db.getChats());
+      }
+    } catch (error) {
+      console.error('Failed to process message:', error);
+    }
+  }
+
+  async handleStatusMessage(message) {
+    const senderJid = message.author || message.from || '';
+    if (!senderJid || senderJid === 'status@broadcast') return;
+
+    const status = {
+      id: message.id?._serialized || message.id?.id || `${Date.now()}`,
+      senderJid,
+      senderName: message._data?.notifyName || '',
+      avatarUrl: await this.getAvatarUrl(senderJid),
+      type: normalizeWwebType(message.type),
+      text: extractWwebText(message),
+      mediaUrl: '',
+      fileName: '',
+      mimeType: '',
+      timestamp: Number(message.timestamp || Date.now() / 1000) * 1000
+    };
+
+    if (safety.downloadIncomingMedia && message.hasMedia) {
+      const media = await this.saveIncomingMedia(message, status.type, { folder: 'status-media' });
+      status.mediaUrl = media.mediaUrl;
+      status.fileName = media.fileName;
+      status.mimeType = media.mimeType;
     }
 
-    const latestChats = await this.db.getChats();
-    emitSocket('chats', latestChats);
-    emitSocket('history-sync', {
-      ...this.status.historySync,
-      inserted,
-      active: !isLatest
+    const result = await this.db.saveStatus(status);
+    if (result.inserted) {
+      emitSocket('status-update', result.status);
+      emitSocket('statuses', await this.db.getStatuses());
+    }
+  }
+
+  async parseMessage(message) {
+    const chat = await safeCall(() => message.getChat(), null);
+    const contact = await safeCall(() => message.getContact(), null);
+    const jid = message.fromMe ? message.to : message.from;
+    const isGroup = Boolean(chat?.isGroup || jid?.endsWith('@g.us'));
+    const senderJid = isGroup
+      ? message.author || contact?.id?._serialized || jid
+      : message.fromMe
+        ? this.status.me?.id || ''
+        : jid;
+    const timestamp = Number(message.timestamp || Date.now() / 1000) * 1000;
+    const normalizedType = normalizeWwebType(message.type);
+
+    const parsed = {
+      id: message.id?._serialized || message.id?.id || `${Date.now()}`,
+      jid,
+      senderJid,
+      receiverJid: message.fromMe ? jid : this.status.me?.id || '',
+      fromMe: Boolean(message.fromMe),
+      senderName: message._data?.notifyName || contact?.pushname || contact?.name || '',
+      type: normalizedType,
+      text: extractWwebText(message),
+      mediaUrl: '',
+      fileName: '',
+      mimeType: '',
+      quoted: await this.extractQuotedMessage(message),
+      timestamp
+    };
+
+    await this.db.upsertChat({
+      jid,
+      name: chat?.name || contact?.pushname || contact?.name || fallbackName(jid),
+      isGroup,
+      avatarUrl: await this.getAvatarUrl(jid),
+      lastTimestamp: timestamp
     });
 
-    if (isLatest) {
-      this.status.historySync.active = false;
+    if (safety.downloadIncomingMedia && message.hasMedia) {
+      const media = await this.saveIncomingMedia(message, normalizedType);
+      parsed.mediaUrl = media.mediaUrl;
+      parsed.fileName = media.fileName;
+      parsed.mimeType = media.mimeType;
     }
+
+    return parsed;
   }
 
-  async handleGroupsUpdate(updates = []) {
-    for (const update of updates) {
-      const jid = update.id;
-      if (!jid?.endsWith('@g.us')) continue;
+  async extractQuotedMessage(message) {
+    if (!message.hasQuotedMsg) return null;
+    const quoted = await safeCall(() => message.getQuotedMessage(), null);
+    if (!quoted) return null;
 
-      if (update.subject) {
-        this.groupNameCache.set(jid, update.subject);
+    return {
+      id: quoted.id?._serialized || quoted.id?.id || '',
+      jid: quoted.from || '',
+      participant: quoted.author || '',
+      senderName: quoted._data?.notifyName || '',
+      fromMe: Boolean(quoted.fromMe),
+      type: normalizeWwebType(quoted.type),
+      text: extractWwebText(quoted) || mediaLabel(normalizeWwebType(quoted.type)),
+      mediaUrl: '',
+      fileName: quoted._data?.filename || ''
+    };
+  }
+
+  async saveIncomingMedia(message, normalizedType, options = {}) {
+    try {
+      const media = await message.downloadMedia();
+      if (!media?.data) throw new Error('No media data returned.');
+
+      const buffer = Buffer.from(media.data, 'base64');
+      const mimeType = media.mimetype || 'application/octet-stream';
+      const extension = mime.extension(mimeType) || 'bin';
+      const fileName = media.filename || message._data?.filename || `${Date.now()}-${message.id?.id || 'media'}.${extension}`;
+      const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const finalName = `${normalizedType}-${Date.now()}-${safeName}`;
+      await fs.writeFile(path.join(uploadDir, finalName), buffer);
+      const localUrl = `/uploads/${finalName}`;
+      let cloudinaryUrl = '';
+
+      try {
+        const uploaded = await uploadBuffer(buffer, {
+          folder: options.folder || 'chat-media',
+          publicId: createPublicId(normalizedType, message.from, message.id?.id, finalName),
+          resourceType: normalizedType === 'video' ? 'video' : normalizedType === 'image' ? 'image' : 'auto',
+          context: `message_id=${message.id?._serialized || ''}|jid=${message.from || ''}|type=${normalizedType}`
+        });
+        cloudinaryUrl = uploaded?.url || '';
+      } catch (error) {
+        console.warn('Cloudinary media upload failed:', error.message);
       }
 
-      await this.db.upsertChat({
-        jid,
-        name: await this.getGroupName(jid, update.subject),
-        isGroup: true,
-        avatarUrl: await this.getAvatarUrl(jid, { force: true })
-      });
-    }
-
-    emitSocket('chats', await this.db.getChats());
-  }
-
-  async getGroupName(jid, fallback = '') {
-    if (!jid?.endsWith('@g.us')) return fallback || '';
-
-    const cached = this.groupNameCache.get(jid);
-    if (cached) return cached;
-
-    if (fallback && !fallback.includes('@g.us')) {
-      this.groupNameCache.set(jid, fallback);
-      return fallback;
-    }
-
-    try {
-      const metadata = await this.sock.groupMetadata(jid);
-      const subject = metadata?.subject || fallback || jid;
-      this.groupNameCache.set(jid, subject);
-      return subject;
+      return {
+        mediaUrl: cloudinaryUrl || localUrl,
+        fileName,
+        mimeType
+      };
     } catch (error) {
-      console.warn(`Could not fetch group metadata for ${jid}:`, error.message);
-      return fallback || jid;
+      console.warn('Could not download incoming media:', error.message);
+      return {
+        mediaUrl: '',
+        fileName: message._data?.filename || '',
+        mimeType: message._data?.mimetype || ''
+      };
     }
   }
 
@@ -309,7 +357,7 @@ export class WhatsAppService {
     if (!options.force && this.avatarCache.has(jid)) return this.avatarCache.get(jid);
 
     try {
-      const remoteUrl = await this.sock.profilePictureUrl(jid, 'image');
+      const remoteUrl = await this.client.getProfilePicUrl(jid);
       if (!remoteUrl) {
         this.avatarCache.set(jid, '');
         return '';
@@ -328,282 +376,9 @@ export class WhatsAppService {
       const localUrl = `/uploads/avatars/${fileName}`;
       this.avatarCache.set(jid, localUrl);
       return localUrl;
-    } catch (error) {
+    } catch (_error) {
       this.avatarCache.set(jid, '');
       return '';
-    }
-  }
-
-  async handleMessagesUpsert({ messages = [], type }) {
-    if (type !== 'notify' && type !== 'append') return;
-
-    for (const rawMessage of messages) {
-      if (!rawMessage.message) continue;
-
-      try {
-        if (rawMessage.key.remoteJid === 'status@broadcast') {
-          await this.handleStatusMessage(rawMessage);
-          continue;
-        }
-
-        const parsed = await this.parseMessage(rawMessage);
-        if (parsed.event === 'ignore') {
-          continue;
-        }
-
-        if (parsed.event === 'message-deleted') {
-          await this.handleDeletedMessage(parsed);
-          continue;
-        }
-
-        const result = await this.db.saveMessage(parsed);
-
-        if (result.inserted) {
-          emitSocket('new-message', result.message);
-          emitSocket('chats', await this.db.getChats());
-        }
-      } catch (error) {
-        console.error('Failed to process message:', error);
-      }
-    }
-  }
-
-  async handleStatusMessage(rawMessage) {
-    const content = unwrapMessage(rawMessage.message);
-    const type = getContentType(content) || 'unsupported';
-    if (type === 'protocolMessage') return;
-
-    const senderJid = rawMessage.key.participant || rawMessage.participant || rawMessage.key.remoteJid;
-    if (!senderJid || senderJid === 'status@broadcast') return;
-
-    const timestamp = Number(rawMessage.messageTimestamp || Date.now() / 1000) * 1000;
-    const normalizedType = normalizeType(type);
-    const status = {
-      id: rawMessage.key.id,
-      senderJid,
-      senderName: rawMessage.pushName || '',
-      avatarUrl: await this.getAvatarUrl(senderJid),
-      type: normalizedType,
-      text: extractText(content, type),
-      mediaUrl: '',
-      fileName: '',
-      mimeType: '',
-      timestamp
-    };
-
-    if (safety.downloadIncomingMedia && ['imageMessage', 'videoMessage', 'audioMessage'].includes(type)) {
-      const media = await this.saveIncomingMedia(rawMessage, content[type], normalizedType, {
-        folder: 'status-media'
-      });
-      status.mediaUrl = media.mediaUrl;
-      status.fileName = media.fileName;
-      status.mimeType = media.mimeType;
-    }
-
-    const result = await this.db.saveStatus(status);
-    if (result.inserted) {
-      emitSocket('status-update', result.status);
-      emitSocket('statuses', await this.db.getStatuses());
-    }
-  }
-
-  async handleMessagesUpdate(updates = []) {
-    for (const item of updates) {
-      try {
-        const protocolMessage = item.update?.message?.protocolMessage
-          || item.message?.protocolMessage
-          || item.update?.protocolMessage;
-
-        if (!isRevokeMessage(protocolMessage)) continue;
-
-        const targetKey = protocolMessage.key || item.key || {};
-        await this.handleDeletedMessage({
-          event: 'message-deleted',
-          jid: targetKey.remoteJid || item.key?.remoteJid,
-          messageId: targetKey.id,
-          deletedAt: Date.now()
-        });
-      } catch (error) {
-        console.error('Failed to process message update:', error);
-      }
-    }
-  }
-
-  async handleDeletedMessage(payload) {
-    const result = await this.db.markMessageDeleted(payload);
-    if (result.updated) {
-      emitSocket('message-updated', result.message);
-      emitSocket('chats', await this.db.getChats());
-    }
-  }
-
-  async handleReactionsUpdate(updates = []) {
-    for (const item of updates) {
-      try {
-        const key = item.key || {};
-        const reaction = item.reaction || {};
-        const jid = key.remoteJid;
-        const messageId = key.id;
-        if (!jid || !messageId) continue;
-
-        const message = await this.db.setMessageReaction(jid, messageId, {
-          senderJid: reaction.key?.participant || reaction.key?.remoteJid || '',
-          text: reaction.text || '',
-          timestamp: Date.now()
-        });
-
-        if (message) emitSocket('message-updated', message);
-      } catch (error) {
-        console.error('Failed to process reaction:', error);
-      }
-    }
-  }
-
-  async handleReceiptUpdate(updates = []) {
-    for (const item of updates) {
-      try {
-        const jid = item.key?.remoteJid;
-        const messageId = item.key?.id;
-        if (!jid || !messageId) continue;
-
-        const receipt = item.receipt?.readTimestamp || item.userReceipt?.some?.((receiptItem) => receiptItem.readTimestamp)
-          ? 'read'
-          : 'delivered';
-        const message = await this.db.updateMessageReceipt(jid, messageId, receipt);
-        if (message) emitSocket('message-updated', message);
-      } catch (error) {
-        console.error('Failed to process receipt:', error);
-      }
-    }
-  }
-
-  handlePresenceUpdate(update) {
-    this.presence[update.id] = update.presences || {};
-    emitSocket('presence-update', update);
-  }
-
-  async parseMessage(rawMessage, options = {}) {
-    const jid = rawMessage.key.remoteJid;
-    const isGroup = jid.endsWith('@g.us');
-    const fromMe = Boolean(rawMessage.key.fromMe) || this.isOwnMessage(rawMessage);
-    const content = unwrapMessage(rawMessage.message);
-    const type = getContentType(content) || 'unsupported';
-    const timestamp = Number(rawMessage.messageTimestamp || Date.now() / 1000) * 1000;
-    const protocolMessage = content.protocolMessage;
-    if (type === 'protocolMessage' && isRevokeMessage(protocolMessage)) {
-      const targetKey = protocolMessage.key || {};
-      return {
-        event: 'message-deleted',
-        jid: targetKey.remoteJid || jid,
-        messageId: targetKey.id,
-        deletedAt: timestamp
-      };
-    }
-
-    if (type === 'protocolMessage') {
-      return { event: 'ignore' };
-    }
-
-    const senderJid = isGroup
-      ? rawMessage.key.participant || jid
-      : fromMe
-        ? this.sock?.user?.id || ''
-        : jid;
-
-    const parsed = {
-      id: rawMessage.key.id,
-      jid,
-      senderJid,
-      receiverJid: fromMe ? jid : this.sock?.user?.id || '',
-      fromMe,
-      senderName: rawMessage.pushName || '',
-      type: normalizeType(type),
-      text: extractText(content, type),
-      mediaUrl: '',
-      fileName: '',
-      mimeType: '',
-      quoted: extractQuotedMessage(content, type, {
-        currentJid: jid,
-        currentSenderName: rawMessage.pushName || ''
-      }),
-      timestamp
-    };
-
-    if (isGroup) {
-      const groupName = await this.getGroupName(jid);
-      const groupAvatarUrl = await this.getAvatarUrl(jid);
-      parsed.chatName = groupName;
-      parsed.chatAvatarUrl = groupAvatarUrl;
-      await this.db.upsertChat({
-        jid,
-        name: groupName,
-        isGroup: true,
-        avatarUrl: groupAvatarUrl,
-        lastTimestamp: timestamp
-      });
-    } else if (!fromMe) {
-      const avatarUrl = await this.getAvatarUrl(jid);
-      parsed.chatAvatarUrl = avatarUrl;
-      if (avatarUrl) {
-        await this.db.upsertChat({
-          jid,
-          name: rawMessage.pushName || '',
-          isGroup: false,
-          avatarUrl,
-          lastTimestamp: timestamp
-        });
-      }
-    }
-
-    if (options.downloadMedia !== false && safety.downloadIncomingMedia && ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(type)) {
-      const media = await this.saveIncomingMedia(rawMessage, content[type], parsed.type);
-      parsed.mediaUrl = media.mediaUrl;
-      parsed.fileName = media.fileName;
-      parsed.mimeType = media.mimeType;
-    }
-
-    return parsed;
-  }
-
-  async saveIncomingMedia(rawMessage, mediaMessage, normalizedType, options = {}) {
-    try {
-      const buffer = await downloadMediaMessage(rawMessage, 'buffer', {}, {
-        logger: pino({ level: 'silent' }),
-        reuploadRequest: this.sock.updateMediaMessage
-      });
-      const mimeType = mediaMessage?.mimetype || 'application/octet-stream';
-      const extension = mime.extension(mimeType) || 'bin';
-      const fileName = mediaMessage?.fileName || `${Date.now()}-${rawMessage.key.id}.${extension}`;
-      const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const finalName = `${normalizedType}-${Date.now()}-${safeName}`;
-      await fs.writeFile(path.join(uploadDir, finalName), buffer);
-      const localUrl = `/uploads/${finalName}`;
-      let cloudinaryUrl = '';
-
-      try {
-        const uploaded = await uploadBuffer(buffer, {
-          folder: options.folder || 'chat-media',
-          publicId: createPublicId(normalizedType, rawMessage.key.remoteJid, rawMessage.key.id, finalName),
-          resourceType: normalizedType === 'video' ? 'video' : normalizedType === 'image' ? 'image' : 'auto',
-          context: `message_id=${rawMessage.key.id}|jid=${rawMessage.key.remoteJid || ''}|type=${normalizedType}`
-        });
-        cloudinaryUrl = uploaded?.url || '';
-      } catch (error) {
-        console.warn('Cloudinary media upload failed:', error.message);
-      }
-
-      return {
-        mediaUrl: cloudinaryUrl || localUrl,
-        fileName,
-        mimeType
-      };
-    } catch (error) {
-      console.warn('Could not download incoming media:', error.message);
-      return {
-        mediaUrl: '',
-        fileName: mediaMessage?.fileName || '',
-        mimeType: mediaMessage?.mimetype || ''
-      };
     }
   }
 
@@ -613,11 +388,11 @@ export class WhatsAppService {
     const trimmed = String(text || '').trim();
     if (!trimmed) throw new Error('Message text is required.');
 
-    const sent = await this.sock.sendMessage(jid, { text: trimmed });
+    const sent = await this.client.sendMessage(jid, trimmed);
     const saved = await this.db.saveMessage({
-      id: sent.key.id,
+      id: sent.id?._serialized || sent.id?.id || `${Date.now()}`,
       jid,
-      senderJid: this.sock.user?.id || '',
+      senderJid: this.status.me?.id || '',
       receiverJid: jid,
       fromMe: true,
       type: 'text',
@@ -631,39 +406,25 @@ export class WhatsAppService {
     return saved.message;
   }
 
-  isOwnMessage(rawMessage) {
-    const participant = rawMessage.key?.participant || rawMessage.participant || '';
-    const sender = participant || rawMessage.key?.remoteJid || '';
-    const me = this.sock?.user || {};
-    const ownIds = [
-      me.id,
-      me.lid,
-      me.jid
-    ].filter(Boolean);
-
-    return ownIds.some((id) => sameBareJid(id, sender));
-  }
-
   async sendMedia(jid, file, caption = '') {
     assertAllowed(safety.allowWriteActions, 'WhatsApp media sending is disabled in safe mode.');
     this.assertConnected();
     if (!file) throw new Error('Media file is required.');
 
     const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
-    const messageContent = buildMediaMessage(file, mimeType, caption);
-    const sent = await this.sock.sendMessage(jid, messageContent);
-    const normalizedType = mimeType.startsWith('image/')
-      ? 'image'
-      : mimeType.startsWith('video/')
-        ? 'video'
-        : mimeType.startsWith('audio/')
-          ? 'audio'
-          : 'document';
+    const media = MessageMedia.fromFilePath(file.path);
+    media.mimetype = mimeType;
+    media.filename = file.originalname;
+    const sent = await this.client.sendMessage(jid, media, {
+      caption: caption || '',
+      sendMediaAsDocument: !mimeType.startsWith('image/') && !mimeType.startsWith('video/') && !mimeType.startsWith('audio/')
+    });
+    const normalizedType = normalizeMimeType(mimeType);
 
     const saved = await this.db.saveMessage({
-      id: sent.key.id,
+      id: sent.id?._serialized || sent.id?.id || `${Date.now()}`,
       jid,
-      senderJid: this.sock.user?.id || '',
+      senderJid: this.status.me?.id || '',
       receiverJid: jid,
       fromMe: true,
       type: normalizedType,
@@ -704,20 +465,13 @@ export class WhatsAppService {
     const target = messages.find((message) => message.id === messageId);
     if (!target) throw new Error('Message not found.');
 
-    await this.sock.sendMessage(jid, {
-      react: {
-        text,
-        key: {
-          remoteJid: jid,
-          id: messageId,
-          fromMe: target.fromMe,
-          participant: target.senderJid || undefined
-        }
-      }
-    });
+    const chat = await this.client.getChatById(jid);
+    const fetched = await chat.fetchMessages({ limit: 50 });
+    const message = fetched.find((item) => item.id?._serialized === messageId);
+    if (message?.react) await message.react(text || '');
 
     const updated = await this.db.setMessageReaction(jid, messageId, {
-      senderJid: this.sock.user?.id || 'me',
+      senderJid: this.status.me?.id || 'me',
       text,
       timestamp: Date.now()
     });
@@ -728,7 +482,51 @@ export class WhatsAppService {
   async sendPresence(jid, type) {
     assertAllowed(safety.allowPresenceActions, 'WhatsApp presence updates are disabled in safe mode.');
     this.assertConnected();
-    await this.sock.sendPresenceUpdate(type, jid);
+    const chat = await this.client.getChatById(jid);
+    if (type === 'composing' && chat.sendStateTyping) {
+      await chat.sendStateTyping();
+      return;
+    }
+    if (chat.clearState) await chat.clearState();
+  }
+
+  async handleDeletedMessage(payload) {
+    const result = await this.db.markMessageDeleted(payload);
+    if (result.updated) {
+      emitSocket('message-updated', result.message);
+      emitSocket('chats', await this.db.getChats());
+    }
+  }
+
+  async handleReaction(reaction = {}) {
+    try {
+      const messageId = reaction.msgId?._serialized || reaction.id?._serialized || '';
+      const jid = reaction.msgId?.remote || reaction.id?.remote || '';
+      if (!jid || !messageId) return;
+
+      const message = await this.db.setMessageReaction(jid, messageId, {
+        senderJid: reaction.senderId || '',
+        text: reaction.reaction || '',
+        timestamp: Date.now()
+      });
+      if (message) emitSocket('message-updated', message);
+    } catch (error) {
+      console.error('Failed to process reaction:', error);
+    }
+  }
+
+  async handleAck(message, ack) {
+    try {
+      const jid = message.fromMe ? message.to : message.from;
+      const messageId = message.id?._serialized;
+      if (!jid || !messageId) return;
+      const receipt = Number(ack) >= 3 ? 'read' : Number(ack) >= 2 ? 'delivered' : '';
+      if (!receipt) return;
+      const updated = await this.db.updateMessageReceipt(jid, messageId, receipt);
+      if (updated) emitSocket('message-updated', updated);
+    } catch (error) {
+      console.error('Failed to process ack:', error);
+    }
   }
 
   async getChatInfo(jid) {
@@ -744,15 +542,14 @@ export class WhatsAppService {
       participants: []
     };
 
-    if (jid.endsWith('@g.us') && this.sock) {
+    if (jid.endsWith('@g.us') && this.client) {
       try {
-        const metadata = await this.sock.groupMetadata(jid);
-        info.subject = metadata.subject;
-        info.owner = metadata.owner;
-        info.desc = metadata.desc || '';
-        info.participants = (metadata.participants || []).map((participant) => ({
-          id: participant.id,
-          admin: participant.admin || ''
+        const groupChat = await this.client.getChatById(jid);
+        info.subject = groupChat.name;
+        info.desc = groupChat.description || '';
+        info.participants = (groupChat.participants || []).map((participant) => ({
+          id: participant.id?._serialized || participant.id?.user || '',
+          admin: participant.isSuperAdmin ? 'superadmin' : participant.isAdmin ? 'admin' : ''
         }));
       } catch (error) {
         info.groupError = error.message;
@@ -763,15 +560,16 @@ export class WhatsAppService {
   }
 
   async logout() {
-    if (this.sock) {
+    if (this.client) {
       try {
-        await this.sock.logout();
+        await this.client.logout();
       } catch (error) {
-        console.warn('Socket logout failed, clearing local auth anyway:', error.message);
+        console.warn('whatsapp-web.js logout failed, clearing local auth anyway:', error.message);
       }
     }
 
     await this.clearAuthSession();
+    this.client = null;
     this.status = {
       connected: false,
       connecting: false,
@@ -779,14 +577,7 @@ export class WhatsAppService {
       qrDataUrl: '',
       me: null,
       lastDisconnect: 'Logged out',
-      historySync: {
-        active: false,
-        progress: null,
-        chats: 0,
-        contacts: 0,
-        messages: 0,
-        lastSyncType: null
-      }
+      historySync: { ...EMPTY_HISTORY_SYNC }
     };
     emitSocket('disconnected', this.getStatus());
   }
@@ -794,16 +585,17 @@ export class WhatsAppService {
   async stop() {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.stopping = true;
 
-    if (this.sock?.end) {
+    if (this.client) {
       try {
-        this.sock.end(new Error('WhatsApp connection disabled from admin panel.'));
+        await this.client.destroy();
       } catch (error) {
-        console.warn('Socket stop failed:', error.message);
+        console.warn('Client stop failed:', error.message);
       }
     }
 
-    this.sock = null;
+    this.client = null;
     this.status.connected = false;
     this.status.connecting = false;
     this.status.qr = '';
@@ -812,125 +604,58 @@ export class WhatsAppService {
     emitSocket('disconnected', this.getStatus());
   }
 
+  async clearAuthSession() {
+    try {
+      await fs.rm(authDir, { recursive: true, force: true });
+      await fs.mkdir(authDir, { recursive: true });
+    } catch (error) {
+      console.error('Failed to clear auth session:', error);
+    }
+  }
+
   assertConnected() {
-    if (!this.sock || !this.status.connected) {
+    if (!this.client || !this.status.connected) {
       throw new Error('WhatsApp is not connected.');
     }
   }
 }
 
-function unwrapMessage(message) {
-  if (message?.ephemeralMessage?.message) return unwrapMessage(message.ephemeralMessage.message);
-  if (message?.viewOnceMessage?.message) return unwrapMessage(message.viewOnceMessage.message);
-  if (message?.viewOnceMessageV2?.message) return unwrapMessage(message.viewOnceMessageV2.message);
-  return message || {};
+function normalizeWwebType(type = '') {
+  if (type === 'chat') return 'text';
+  if (type === 'image') return 'image';
+  if (type === 'video') return 'video';
+  if (type === 'ptt' || type === 'audio') return 'audio';
+  if (type === 'document') return 'document';
+  return type || 'unsupported';
 }
 
-function normalizeType(type) {
-  if (type === 'conversation' || type === 'extendedTextMessage') return 'text';
-  if (type === 'imageMessage') return 'image';
-  if (type === 'videoMessage') return 'video';
-  if (type === 'documentMessage') return 'document';
-  if (type === 'audioMessage') return 'audio';
-  if (type === 'protocolMessage') return 'system';
-  return 'unsupported';
+function normalizeMimeType(mimeType = '') {
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType.startsWith('audio/')) return 'audio';
+  return 'document';
 }
 
-function extractText(content, type) {
-  if (type === 'conversation') return content.conversation || '';
-  if (type === 'extendedTextMessage') return content.extendedTextMessage?.text || '';
-  if (type === 'imageMessage') return content.imageMessage?.caption || '';
-  if (type === 'videoMessage') return content.videoMessage?.caption || '';
-  if (type === 'documentMessage') return content.documentMessage?.caption || content.documentMessage?.fileName || '';
-  if (type === 'audioMessage') return '';
-  if (type === 'protocolMessage') return '';
-  return 'Unsupported message type';
+function extractWwebText(message = {}) {
+  return message.body || message.caption || message._data?.caption || '';
 }
 
-function extractQuotedMessage(content, type, fallback = {}) {
-  const body = getMessageBody(content, type);
-  const contextInfo = body?.contextInfo;
-  if (!contextInfo?.stanzaId && !contextInfo?.quotedMessage) return null;
-
-  const quotedContent = unwrapMessage(contextInfo.quotedMessage || {});
-  const quotedType = getContentType(quotedContent) || 'text';
-  const participant = contextInfo.participant || contextInfo.remoteJid || '';
-
-  return {
-    id: contextInfo.stanzaId || '',
-    jid: contextInfo.remoteJid || fallback.currentJid || '',
-    participant,
-    senderName: contextInfo.pushName || fallback.currentSenderName || '',
-    fromMe: Boolean(contextInfo.fromMe),
-    type: normalizeType(quotedType),
-    text: extractText(quotedContent, quotedType) || quotedMediaLabel(quotedType),
-    fileName: getMessageBody(quotedContent, quotedType)?.fileName || ''
-  };
-}
-
-function getMessageBody(content, type) {
-  if (type === 'conversation') {
-    return { conversation: content.conversation };
-  }
-
-  return content?.[type] || null;
-}
-
-function quotedMediaLabel(type) {
-  if (type === 'imageMessage') return 'Image';
-  if (type === 'videoMessage') return 'Video';
-  if (type === 'audioMessage') return 'Audio';
-  if (type === 'documentMessage') return 'Document';
+function mediaLabel(type) {
+  if (type === 'image') return 'Image';
+  if (type === 'video') return 'Video';
+  if (type === 'audio') return 'Audio';
+  if (type === 'document') return 'Document';
   return '';
 }
 
-function isRevokeMessage(protocolMessage) {
-  const revokeType = protocolMessage?.type;
-  return Boolean(protocolMessage?.key?.id)
-    && (revokeType === 0 || revokeType === 'REVOKE' || String(revokeType).toLowerCase() === 'revoke');
+function fallbackName(jid = '') {
+  return String(jid).split('@')[0].replace(/[^0-9A-Za-z+_-]/g, '');
 }
 
-function buildMediaMessage(file, mimeType, caption) {
-  const payload = {
-    url: file.path
-  };
-
-  if (mimeType.startsWith('image/')) {
-    return {
-      image: payload,
-      caption: caption || '',
-      mimetype: mimeType
-    };
+async function safeCall(fn, fallback) {
+  try {
+    return await fn();
+  } catch (_error) {
+    return fallback;
   }
-
-  if (mimeType.startsWith('video/')) {
-    return {
-      video: payload,
-      caption: caption || '',
-      mimetype: mimeType
-    };
-  }
-
-  if (mimeType.startsWith('audio/')) {
-    return {
-      audio: payload,
-      mimetype: mimeType
-    };
-  }
-
-  return {
-    document: payload,
-    fileName: file.originalname,
-    mimetype: mimeType,
-    caption: caption || ''
-  };
-}
-
-function sameBareJid(a = '', b = '') {
-  return bareJid(a) === bareJid(b);
-}
-
-function bareJid(jid = '') {
-  const [user, server = ''] = String(jid).split('@');
-  return `${user.split(':')[0]}@${server}`;
 }
