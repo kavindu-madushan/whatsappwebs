@@ -1,11 +1,9 @@
 [variables]
-PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
-PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
+PUPPETEER_CACHE_DIR = "/app/.cache/puppeteer"
 
 [phases.setup]
 aptPkgs = [
   "...",
-  "chromium",
   "fonts-liberation",
   "libasound2t64",
   "libatk-bridge2.0-0",
