@@ -12,12 +12,12 @@ const { Client, LocalAuth, MessageMedia } = whatsappWeb;
 
 const BROWSER_EXECUTABLE_CANDIDATES = [
   process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
   '/usr/bin/google-chrome-stable',
   '/usr/bin/google-chrome',
   '/nix/var/nix/profiles/default/bin/chromium',
-  '/root/.nix-profile/bin/chromium'
+  '/root/.nix-profile/bin/chromium',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser'
 ].filter(Boolean);
 
 const EMPTY_HISTORY_SYNC = {
@@ -106,6 +106,10 @@ export class WhatsAppService {
     for (const executablePath of BROWSER_EXECUTABLE_CANDIDATES) {
       try {
         await fs.access(executablePath);
+        if (await this.isSnapChromiumWrapper(executablePath)) {
+          console.warn(`Skipping ${executablePath} because it is an Ubuntu snap wrapper, not a runnable browser.`);
+          continue;
+        }
         process.env.PUPPETEER_EXECUTABLE_PATH = executablePath;
         return executablePath;
       } catch {
@@ -119,6 +123,15 @@ export class WhatsAppService {
     }
 
     return undefined;
+  }
+
+  async isSnapChromiumWrapper(executablePath) {
+    try {
+      const content = await fs.readFile(executablePath, 'utf8');
+      return content.includes('snap install chromium') || content.includes('requires the chromium snap');
+    } catch {
+      return false;
+    }
   }
 
   bindClientEvents(client) {
