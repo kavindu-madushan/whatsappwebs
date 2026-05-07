@@ -10,6 +10,16 @@ import { authDir, avatarDir, uploadDir } from './storage-paths.js';
 
 const { Client, LocalAuth, MessageMedia } = whatsappWeb;
 
+const BROWSER_EXECUTABLE_CANDIDATES = [
+  process.env.PUPPETEER_EXECUTABLE_PATH,
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/google-chrome',
+  '/nix/var/nix/profiles/default/bin/chromium',
+  '/root/.nix-profile/bin/chromium'
+].filter(Boolean);
+
 const EMPTY_HISTORY_SYNC = {
   active: false,
   progress: null,
@@ -61,13 +71,15 @@ export class WhatsAppService {
     await fs.mkdir(uploadDir, { recursive: true });
     await fs.mkdir(avatarDir, { recursive: true });
 
+    const executablePath = await this.resolveBrowserExecutablePath();
+
     this.client = new Client({
       authStrategy: new LocalAuth({
         dataPath: authDir
       }),
       puppeteer: {
         headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        ...(executablePath ? { executablePath } : {}),
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -88,6 +100,25 @@ export class WhatsAppService {
       emitSocket('disconnected', this.getStatus());
       this.scheduleReconnect();
     });
+  }
+
+  async resolveBrowserExecutablePath() {
+    for (const executablePath of BROWSER_EXECUTABLE_CANDIDATES) {
+      try {
+        await fs.access(executablePath);
+        process.env.PUPPETEER_EXECUTABLE_PATH = executablePath;
+        return executablePath;
+      } catch {
+        // Try the next known Railway/Linux browser path.
+      }
+    }
+
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      console.warn(`Configured browser was not found at ${process.env.PUPPETEER_EXECUTABLE_PATH}; falling back to Puppeteer's bundled browser.`);
+      delete process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    return undefined;
   }
 
   bindClientEvents(client) {
@@ -660,4 +691,3 @@ async function safeCall(fn, fallback) {
     return fallback;
   }
 }
- 
