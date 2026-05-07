@@ -23,7 +23,7 @@ export const settingsFile = runtimeDataDir
   : path.join(__dirname, 'data', 'admin-settings.json');
 
 export const authDir = runtimeDataDir
-  ? path.join(runtimeDataDir, 'auth_info_baileys')
-  : path.join(__dirname, 'auth_info_baileys');
+  ? path.join(runtimeDataDir, 'wwebjs_auth')
+  : path.join(__dirname, 'wwebjs_auth');
 
 export const avatarDir = path.join(uploadDir, 'avatars');
